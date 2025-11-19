@@ -5,10 +5,10 @@ import requests
 from typing import List, Dict, Any
 from supabase import create_client  # pip install supabase requests
 
-PCO_APP_ID = os.environ["c595bc98a31668bdbfb9a16d2466be1fda0cb417f8d56f32f6e6af8ec5540e6f"]
-PCO_SECRET = os.environ["pco_pat_b4d76c2a27b85ab778d433729ed4470ceac85aeedd573ec630eba14129d9790abb1f4e09"]
-SUPABASE_URL = os.environ["https://rvfbwjvrrwwnofbghdpk.supabase.co"]
-SUPABASE_SERVICE_KEY = os.environ["process.env.SUPABASE_KEY"]  # service role key
+PCO_APP_ID = os.environ["PCO_APP_ID"]
+PCO_SECRET = os.environ["PCO_SECRET"]
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]  # service role key
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
