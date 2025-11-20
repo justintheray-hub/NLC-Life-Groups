@@ -44,6 +44,8 @@ SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
+# NOTE: If your Pipedream script used a more specific endpoint (like a group_type),
+# you can swap this BASE_URL to match that.
 BASE_URL = "https://api.planningcenteronline.com/groups/v2/groups"
 
 
@@ -86,16 +88,21 @@ def fetch_all_groups() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
 
         data = json_data.get("data", []) or []
         included = json_data.get("included", []) or []
+        links = json_data.get("links", {}) or {}
+
+        print(f"  Page {page} returned {len(data)} groups")
+        print(f"  links: {links}")
 
         all_data.extend(data)
         all_included.extend(included)
 
-        links = json_data.get("links", {}) or {}
         next_url = links.get("next")
 
         # Fallback in case some variants put cursor info elsewhere
         if not next_url:
             meta = json_data.get("meta", {}) or {}
+            if meta:
+                print(f"  meta: {meta}")
             next_url = meta.get("next") or meta.get("next_page_url")
 
         url = next_url
@@ -209,6 +216,17 @@ def transform_group(group: Dict[str, Any], tag_lookup: Dict[str, str]) -> Dict[s
     }
 
 
+def clear_groups_table() -> None:
+    """Delete all existing rows from public.groups before re-inserting."""
+    print("Clearing existing groups from Supabase...")
+    response = supabase.table("groups").delete().neq("pco_group_id", "").execute()
+    error = getattr(response, "error", None)
+    if error:
+        print("Error clearing groups:", error)
+        raise RuntimeError(error)
+    print("Existing groups cleared.")
+
+
 def sync() -> None:
     print("Starting sync from Planning Center to Supabase...")
 
@@ -217,26 +235,28 @@ def sync() -> None:
 
     rows = [transform_group(g, tag_lookup) for g in data]
 
-    print(f"Prepared {len(rows)} rows to upsert into Supabase")
+    print(f"Prepared {len(rows)} rows to insert into Supabase")
+
+    # Clear table first
+    clear_groups_table()
 
     batch_size = 200
     for i in range(0, len(rows), batch_size):
         batch = rows[i: i + batch_size]
-        print(f"Upserting batch {i // batch_size + 1} ({len(batch)} rows)...")
+        print(f"Inserting batch {i // batch_size + 1} ({len(batch)} rows)...")
 
         response = (
             supabase.table("groups")
-            .upsert(batch, on_conflict="pco_group_id")
+            .insert(batch)
             .execute()
         )
 
-        # supabase-py Response may have `.error` and `.data`
         error = getattr(response, "error", None)
         if error:
             print("Supabase error:", error)
             raise RuntimeError(error)
         else:
-            print("Batch upserted successfully")
+            print("Batch inserted successfully")
 
     print("Sync complete.")
 
