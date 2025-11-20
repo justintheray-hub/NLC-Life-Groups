@@ -44,12 +44,12 @@ SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# NOTE: If your Pipedream script used a more specific endpoint (like a group_type),
+# If your old Pipedream script used a more specific endpoint (like a group_type),
 # you can swap this BASE_URL to match that.
 BASE_URL = "https://api.planningcenteronline.com/groups/v2/groups"
 
 
-# --- Helpers ---
+# --- Helpers ---------------------------------------------------------------
 
 def basic_auth_header(app_id: str, secret: str) -> str:
     token = base64.b64encode(f"{app_id}:{secret}".encode("utf-8")).decode("utf-8")
@@ -60,6 +60,8 @@ def fetch_all_groups() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Fetch all groups from PCO with pagination.
 
     Returns (all_groups_data, all_included_resources).
+    We ignore `included` now since we're not using tags, but keep the
+    return shape in case you want it later.
     """
     headers = {
         "Authorization": basic_auth_header(PCO_APP_ID, PCO_SECRET),
@@ -70,14 +72,15 @@ def fetch_all_groups() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     all_included: List[Dict[str, Any]] = []
 
     url = BASE_URL
-    params = {"per_page": 100, "include": "tags"}
+    # We can drop include=tags since we don't need them anymore
+    params = {"per_page": 100}
 
     page = 0
     while url:
         page += 1
         print(f"Requesting page {page}: {url}")
 
-        # Only send params on first request. `links.next` already has its own query string.
+        # Only send params on first request. `links.next` has its own query string.
         if page == 1:
             resp = requests.get(url, headers=headers, params=params)
         else:
@@ -98,7 +101,7 @@ def fetch_all_groups() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
 
         next_url = links.get("next")
 
-        # Fallback in case some variants put cursor info elsewhere
+        # Fallback, just in case
         if not next_url:
             meta = json_data.get("meta", {}) or {}
             if meta:
@@ -108,111 +111,80 @@ def fetch_all_groups() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         url = next_url
 
     print(f"Fetched {len(all_data)} groups total from PCO")
-    print(f"Collected {len(all_included)} included resources (tags etc.)")
     return all_data, all_included
 
 
-def build_tag_lookup(included: List[Dict[str, Any]]) -> Dict[str, str]:
-    """Build a map of tag_id -> tag_name from `included` resources.
+def transform_group(group: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform a raw PCO group into one Supabase `groups` row using attributes only."""
 
-    This is intentionally permissive on the `type` field, since PCO may use
-    different strings (e.g. "Tag", "tag", "group_tag"). Anything that has
-    an `id` and `attributes.name` will be mapped.
-    """
-    tag_lookup: Dict[str, str] = {}
-
-    for item in included:
-        attrs = item.get("attributes", {}) or {}
-        tag_id = item.get("id")
-        name = attrs.get("name")
-        if not tag_id or not name:
-            continue
-
-        t = (item.get("type") or "").lower()
-        if "tag" in t:  # e.g. "tag", "Tag", "group_tag"
-            tag_lookup[tag_id] = name
-
-    print(f"Built tag lookup with {len(tag_lookup)} tags")
-    return tag_lookup
-
-
-def parse_tags_for_group(group: Dict[str, Any], tag_lookup: Dict[str, str]) -> Dict[str, Any]:
-    """Extract structured fields + raw tag ids/names from a group.
-
-    Recommended PCO tag naming convention (examples):
-      Campus: Conway
-      Stage: Young Adults
-      Type: Bible Study
-      Day: Monday
-    """
-    rel = group.get("relationships", {}) or {}
-    tags_rel = rel.get("tags", {}) or {}
-    tag_data = tags_rel.get("data", []) or []
-
-    tag_ids: List[str] = []
-    tag_names: List[str] = []
-
-    for t in tag_data:
-        tag_id = t.get("id")
-        if not tag_id:
-            continue
-        tag_ids.append(tag_id)
-        if tag_id in tag_lookup:
-            tag_names.append(tag_lookup[tag_id])
-
-    campus = None
-    stage_of_life = None
-    group_type = None
-    days_of_week: List[str] = []
-
-    # Only parse structured info if we have names
-    for name in tag_names:
-        if name.startswith("Campus:"):
-            campus = name.split(":", 1)[1].strip()
-        elif name.startswith("Stage:"):
-            stage_of_life = name.split(":", 1)[1].strip()
-        elif name.startswith("Type:"):
-            group_type = name.split(":", 1)[1].strip()
-        elif name.startswith("Day:"):
-            day = name.split(":", 1)[1].strip()
-            days_of_week.append(day)
-
-    return {
-        "campus": campus,
-        "stage_of_life": stage_of_life,
-        "group_type": group_type,
-        "days_of_week": days_of_week,
-        "tag_ids": tag_ids,
-        "tag_names": tag_names,
-    }
-
-
-def transform_group(group: Dict[str, Any], tag_lookup: Dict[str, str]) -> Dict[str, Any]:
-    """Transform a raw PCO group into one Supabase `groups` row.
-
-    Adjust attribute names here if your PCO account uses different fields
-    (e.g., meeting time, capacity, enrollment, URL).
-    """
     attrs = group.get("attributes", {}) or {}
-    tag_info = parse_tags_for_group(group, tag_lookup)
+
+    # Try a few likely attribute names for each field; if a key doesn't exist,
+    # .get() will just return None, which is fine.
+    name = attrs.get("name")
+    description = attrs.get("description") or attrs.get("short_description")
+
+    # Campus-ish
+    campus = (
+        attrs.get("campus_name")
+        or attrs.get("campus")
+        or attrs.get("location_name")
+    )
+
+    # Meeting day / days_of_week
+    meeting_day = attrs.get("meeting_day") or attrs.get("meets_on")
+    days_of_week = [meeting_day] if meeting_day else None
+
+    # Time of day
+    time_of_day = (
+        attrs.get("meeting_time")
+        or attrs.get("time")
+        or attrs.get("starts_at")
+    )
+
+    # Stage of life
+    stage_of_life = (
+        attrs.get("life_stage")
+        or attrs.get("group_lifestage")
+        or attrs.get("age_range")
+    )
+
+    # Group type
+    group_type = (
+        attrs.get("group_type")
+        or attrs.get("type")
+        or attrs.get("category")
+    )
+
+    # Capacity / enrollment
+    max_size = attrs.get("capacity") or attrs.get("max_participants")
+    current_size = attrs.get("enrollment") or attrs.get("current_participants")
+
+    # URLs
+    church_center_url = (
+        attrs.get("url")
+        or attrs.get("web_url")
+        or attrs.get("public_url")
+    )
+
+    # Open / archived
+    is_open = not bool(attrs.get("archived_at"))
 
     return {
         "pco_group_id": group.get("id"),
-        "name": attrs.get("name"),
-        "description": attrs.get("description"),
-        "campus": tag_info["campus"],
-        "days_of_week": tag_info["days_of_week"] or None,
-        "time_of_day": attrs.get("meeting_time"),  # adjust if needed
-        "stage_of_life": tag_info["stage_of_life"],
-        "group_type": tag_info["group_type"],
-        "is_open": not bool(attrs.get("archived_at")),
-        "max_size": attrs.get("capacity"),        # adjust if needed
-        "current_size": attrs.get("enrollment"),  # adjust if needed
-        "church_center_url": attrs.get("url"),    # adjust if needed
-        "tags": {
-            "ids": tag_info["tag_ids"],
-            "names": tag_info["tag_names"],
-        },
+        "name": name,
+        "description": description,
+        "campus": campus,
+        "days_of_week": days_of_week,
+        "time_of_day": time_of_day,
+        "stage_of_life": stage_of_life,
+        "group_type": group_type,
+        "is_open": is_open,
+        "max_size": max_size,
+        "current_size": current_size,
+        "church_center_url": church_center_url,
+        # You said you don't need tags; we'll just store an empty object.
+        "tags": {},
     }
 
 
@@ -230,36 +202,8 @@ def clear_groups_table() -> None:
 def sync() -> None:
     print("Starting sync from Planning Center to Supabase...")
 
-    data, included = fetch_all_groups()
-    tag_lookup = build_tag_lookup(included)
+    data, _included = fetch_all_groups()
 
-    rows = [transform_group(g, tag_lookup) for g in data]
+    rows = [transform_group(g) for g in data]
 
-    print(f"Prepared {len(rows)} rows to insert into Supabase")
-
-    # Clear table first
-    clear_groups_table()
-
-    batch_size = 200
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i: i + batch_size]
-        print(f"Inserting batch {i // batch_size + 1} ({len(batch)} rows)...")
-
-        response = (
-            supabase.table("groups")
-            .insert(batch)
-            .execute()
-        )
-
-        error = getattr(response, "error", None)
-        if error:
-            print("Supabase error:", error)
-            raise RuntimeError(error)
-        else:
-            print("Batch inserted successfully")
-
-    print("Sync complete.")
-
-
-if __name__ == "__main__":
-    sync()
+    print(f"Prepared {len(rows
