@@ -206,4 +206,31 @@ def sync() -> None:
 
     rows = [transform_group(g) for g in data]
 
-    print(f"Prepared {len(rows
+    print(f"Prepared {len(rows)} rows to insert into Supabase")
+
+    # Clear table first
+    clear_groups_table()
+
+    batch_size = 200
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i: i + batch_size]
+        print(f"Inserting batch {i // batch_size + 1} ({len(batch)} rows)...")
+
+        response = (
+            supabase.table("groups")
+            .insert(batch)
+            .execute()
+        )
+
+        error = getattr(response, "error", None)
+        if error:
+            print("Supabase error:", error)
+            raise RuntimeError(error)
+        else:
+            print("Batch inserted successfully")
+
+    print("Sync complete.")
+
+
+if __name__ == "__main__":
+    sync()
